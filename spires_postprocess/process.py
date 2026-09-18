@@ -18,7 +18,10 @@ from spires_postprocess.lookup import (
     load_albedo_lookup,
     load_forcing_lookup,
 )
-from spires_postprocess.snow_fraction import apply_snow_fraction_adjustments
+from spires_postprocess.snow_fraction import (
+    CANOPY_CORRECTION_POLICIES,
+    apply_snow_fraction_adjustments,
+)
 from spires_postprocess.snow_radiative import (
     compute_delta_vis,
     compute_radiative_forcing,
@@ -54,6 +57,7 @@ def process(
     forcing_lookup: xr.Dataset | str | Path | None = None,
     average_vertical_crown_radius: float = 4.644,
     average_horizontal_crown_radius: float = 1.72,
+    canopy_correction_policy: str = "legacy",
 ) -> SpiresData:
     """Apply explicitly selected postprocessing operations.
 
@@ -73,6 +77,10 @@ def process(
     for name, value in options.items():
         if type(value) is not bool:
             raise TypeError(f"{name} must be a boolean")
+    if canopy_correction_policy not in CANOPY_CORRECTION_POLICIES:
+        raise ValueError(f"unknown canopy_correction_policy: {canopy_correction_policy!r}")
+    if canopy_correction_policy != "legacy" and not apply_canopy_correction:
+        raise ValueError("sensor-specific canopy policy requires apply_canopy_correction=True")
 
     validate_spires_data(data)
     if data.results is None:
@@ -140,6 +148,7 @@ def process(
             aspect=aspect,
             average_vertical_crown_radius=average_vertical_crown_radius,
             average_horizontal_crown_radius=average_horizontal_crown_radius,
+            canopy_correction_policy=canopy_correction_policy,
         )
 
     if calculate_albedo:

@@ -60,6 +60,29 @@ declared metre values to kilometres.
 
 ## Canopy and ice adjustments
 
+The September 18 operational selection uses **S2_062 for MODIS** and
+**S2_083 for VIIRS**, with explicit `canopy_correction_policy="modis_s2_062"`
+or `"viirs_s2_083"` in `process()` or `apply_snow_fraction_adjustments()`.
+The common/MODIS policy is not selected for VIIRS. `"legacy"` remains the
+backward-compatible default for callers without an explicit policy.
+
+Both selected policies require terrain-aware projection with crown radii
+4.644/1.72. Let C be canopy fraction, V projected canopy, and S weighted shade.
+MODIS uses full shade and exponent rho=0.1. VIIRS uses a shade weight decreasing
+linearly from 1 at C=0.05 to 0.25 at C=0.30, constant outside that interval,
+and rho=0.5. Set GF=1/(1-clip(S+V,0,0.99)), GR=1/(1-clip(S+C,0,0.99)),
+and H=GF/GR. Use GR*H**rho only where H>1, otherwise GF. Cap total gain at 5
+and corrected snow fraction at 1. The selected candidate and parameters are
+persisted on `canopy_adjusted_fsnow`.
+
+Raw `fsnow` and `fshade` remain intact. The independent float32 `snow_detected`
+layer uses raw fsnow >0.05 for MODIS and >0.04 for VIIRS, retaining missing
+raw observations as NaN. Detection does not zero the corrected magnitude;
+cloud/quality eligibility remains a separate downstream decision. The existing
+`ice_adjusted_fsnow` equation remains a separate legacy ice product; the new
+canopy policy does not change it. Operational full-tile confirmation is required
+before these regenerated products are used for temporal policy selection.
+
 The lower-level API remains independently usable:
 
 ```python
