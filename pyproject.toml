@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Niklas Griessbaum" }]
 keywords = ["snow", "remote sensing", "xarray", "canopy", "glacier ice", "inpainting"]
 dependencies = [
-    "spires-contract @ git+https://github.com/SPIReS-Organization/spires-contract.git@main",
+    "spires-contract @ git+https://github.com/RittgerLabGroup/spires-contract.git@dda5155c9af5d4976d67de0fb6de1ff1d73d080d",
     "numpy",
     "xarray",
     "scipy",
@@ -22,8 +22,8 @@ dependencies = [
 test = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/SPIReS-Organization/spires-postprocess"
-Repository = "https://github.com/SPIReS-Organization/spires-postprocess"
+Homepage = "https://github.com/RittgerLabGroup/spires-postprocess"
+Repository = "https://github.com/RittgerLabGroup/spires-postprocess"
 
 [tool.setuptools.packages.find]
 where = ["./"]

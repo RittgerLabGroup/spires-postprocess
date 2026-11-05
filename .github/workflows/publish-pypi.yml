@@ -34,7 +34,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     # Only publish on a real GitHub release, never on manual dispatch.
-    if: github.event_name == 'release'
+    if: github.repository_owner == 'SPIReS-Organization' && github.event_name == 'release'
     permissions:
       id-token: write  # OIDC trusted publishing (no API token needed)
     steps:
