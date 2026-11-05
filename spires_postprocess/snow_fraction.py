@@ -16,6 +16,24 @@ from spires_postprocess._xarray_validation import (
 
 _OBSCURATION_LIMIT = 0.99
 _GEOMETRY_EPSILON = 1.0e-6
+CANOPY_POLICY_BY_SENSOR = {
+    "modis": "modis_full_shade",
+    "viirs": "viirs_canopy_weighted_shade",
+}
+CANOPY_CORRECTION_POLICIES = tuple(CANOPY_POLICY_BY_SENSOR.values())
+
+
+def validate_canopy_correction_policy(policy: str | None, sensor: str | None) -> None:
+    """Require a supported, explicit policy matching the declared sensor."""
+    if policy not in CANOPY_CORRECTION_POLICIES:
+        raise ValueError(
+            "Canopy correction requires an explicit canopy_correction_policy: "
+            + ", ".join(CANOPY_CORRECTION_POLICIES)
+        )
+    if sensor not in CANOPY_POLICY_BY_SENSOR:
+        raise ValueError("Canopy correction requires sensor='modis' or sensor='viirs'")
+    if policy != CANOPY_POLICY_BY_SENSOR[sensor]:
+        raise ValueError(f"Sensor {sensor!r} requires {CANOPY_POLICY_BY_SENSOR[sensor]!r}")
 
 
 def calculate_viewable_canopy_fraction(
@@ -151,10 +169,14 @@ def apply_snow_fraction_adjustments(
     average_horizontal_crown_radius: float = 1.72,
     canopy_source: str | None = None,
     ice_source: str | None = None,
+    canopy_correction_policy: str | None = None,
+    sensor: str | None = None,
 ) -> xr.Dataset:
     """Add requested canopy- and ice-adjusted snow-fraction layers.
 
-    Supplying ``canopy_fraction`` requests ``canopy_adjusted_fsnow``. Supplying
+    Supplying ``canopy_fraction`` requests ``canopy_adjusted_fsnow`` and requires
+    an explicit matching ``sensor`` and
+    ``canopy_correction_policy``, with no legacy fallback. Supplying
     ``ice_fraction`` requests ``ice_adjusted_fsnow``. When both are supplied, the
     ice-adjusted layer is calculated directly from the original ``fsnow`` using
     shade, viewable canopy, and ice together, matching the SPIRES 2025.0.1 daily
@@ -162,6 +184,14 @@ def apply_snow_fraction_adjustments(
     are not modified. Required results and ancillary inputs must already be
     float32 and within their documented physical ranges.
     """
+    if canopy_fraction is not None:
+        validate_canopy_correction_policy(canopy_correction_policy, sensor)
+        if slope is None or aspect is None or sensor_azimuth is None:
+            raise ValueError("sensor-specific canopy correction requires canopy, slope, aspect, and sensor azimuth")
+        if average_vertical_crown_radius != 4.644 or average_horizontal_crown_radius != 1.72:
+            raise ValueError("selected canopy policies require the evaluated crown radii 4.644 and 1.72")
+    elif canopy_correction_policy is not None:
+        raise ValueError("canopy_correction_policy requires canopy_fraction")
     if canopy_fraction is None and ice_fraction is None:
         raise ValueError("provide canopy_fraction, ice_fraction, or both")
 
@@ -189,21 +219,10 @@ def apply_snow_fraction_adjustments(
             name="viewable_canopy_fraction",
         )
         viewable_canopy.attrs = viewable_canopy_attrs
-        canopy_obscuration = (fshade + viewable_canopy).clip(
-            min=0.0,
-            max=_OBSCURATION_LIMIT,
-        )
-        canopy_adjusted = (fsnow / (1.0 - canopy_obscuration)).clip(
-            min=0.0,
-            max=1.0,
-        )
-        canopy_adjusted = canopy_adjusted.astype("float32").rename(
-            "canopy_adjusted_fsnow"
-        )
-        canopy_adjusted.attrs = {
+        canopy_attrs = {
             "long_name": "Snow fraction adjusted for shade and canopy obstruction",
             "units": "1",
-            "model": "spires_2025_0_1_obscuration",
+            "model": "sensor_specific_canopy",
             "canopy_correction_applied": 1,
             "shade_included": 1,
             "canopy_included": 1,
@@ -216,7 +235,49 @@ def apply_snow_fraction_adjustments(
             ),
             "obscuration_upper_bound": _OBSCURATION_LIMIT,
         }
-        adjusted_results["canopy_adjusted_fsnow"] = canopy_adjusted
+        canopy = _prepare_fraction_layer(canopy_fraction, fsnow, name="canopy_fraction")
+        is_modis = sensor == "modis"
+        rho = np.float32(0.1 if is_modis else 0.5)
+        weight = xr.ones_like(canopy) if is_modis else (
+            np.float32(1) - np.float32(0.75)
+            * ((canopy - np.float32(0.05)) / np.float32(0.25)).clip(0, 1)
+        )
+        shade = weight * fshade
+        full_denominator = np.float32(1) - (shade + viewable_canopy).clip(0, np.float32(0.99))
+        reference_denominator = np.float32(1) - (shade + canopy).clip(0, np.float32(0.99))
+        full_gain = np.float32(1) / full_denominator
+        reference_gain = np.float32(1) / reference_denominator
+        geometry_gain = full_gain / reference_gain
+        amplification = geometry_gain > np.float32(1)
+        gain = xr.where(
+            amplification,
+            reference_gain * np.power(geometry_gain, xr.full_like(geometry_gain, rho)),
+            full_gain,
+        )
+        preclip = xr.where(amplification, fsnow * gain, fsnow / full_denominator)
+        preclip = xr.where(gain > np.float32(5), fsnow * np.float32(5), preclip)
+        corrected = preclip.clip(0, 1).astype("float32")
+        corrected.attrs = canopy_attrs
+        corrected.attrs.update(
+            canopy_correction_policy=canopy_correction_policy,
+            sensor=sensor,
+            geometry_gain_exponent=float(rho),
+            geometry_regularization="amplification_only",
+            shade_treatment="full" if is_modis else "ramp_1_at_0.05_to_0.25_at_0.30",
+            total_gain_cap=5.0,
+            detection_applied=0,
+        )
+        adjusted_results["canopy_adjusted_fsnow"] = corrected
+        threshold = np.float32(0.05 if is_modis else 0.04)
+        detected = xr.where(fsnow.notnull(), (fsnow > threshold).astype("float32"), np.float32(np.nan))
+        detected.attrs = {
+            "long_name": "Raw snow detection, independent of canopy-adjusted magnitude and QA eligibility",
+            "units": "1", "raw_fsnow_threshold": float(threshold),
+            "comparison": "strictly_greater_than", "qa_eligibility_applied": 0,
+            "canopy_correction_policy": canopy_correction_policy,
+            "sensor": sensor,
+        }
+        adjusted_results["snow_detected"] = detected.astype("float32")
 
     if ice_fraction is not None:
         ice = _prepare_fraction_layer(ice_fraction, fsnow, name="ice_fraction")
