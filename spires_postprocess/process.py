@@ -19,7 +19,7 @@ from spires_postprocess.lookup import (
     load_forcing_lookup,
 )
 from spires_postprocess.snow_fraction import (
-    CANOPY_CORRECTION_POLICIES,
+    validate_canopy_correction_policy,
     apply_snow_fraction_adjustments,
 )
 from spires_postprocess.snow_radiative import (
@@ -57,7 +57,8 @@ def process(
     forcing_lookup: xr.Dataset | str | Path | None = None,
     average_vertical_crown_radius: float = 4.644,
     average_horizontal_crown_radius: float = 1.72,
-    canopy_correction_policy: str = "legacy",
+    canopy_correction_policy: str | None = None,
+    sensor: str | None = None,
 ) -> SpiresData:
     """Apply explicitly selected postprocessing operations.
 
@@ -66,6 +67,8 @@ def process(
     type; callers translate its values into these explicit keyword arguments.
     Scene and ancillary inputs use strict canonical field names, and a requested
     operation fails with an actionable error when one is absent.
+    Canopy correction additionally requires an explicit sensor and matching
+    policy; this low-level API never guesses a policy from the data arrays.
     """
     options = {
         "apply_canopy_correction": apply_canopy_correction,
@@ -77,10 +80,10 @@ def process(
     for name, value in options.items():
         if type(value) is not bool:
             raise TypeError(f"{name} must be a boolean")
-    if canopy_correction_policy not in CANOPY_CORRECTION_POLICIES:
-        raise ValueError(f"unknown canopy_correction_policy: {canopy_correction_policy!r}")
-    if canopy_correction_policy != "legacy" and not apply_canopy_correction:
-        raise ValueError("sensor-specific canopy policy requires apply_canopy_correction=True")
+    if apply_canopy_correction:
+        validate_canopy_correction_policy(canopy_correction_policy, sensor)
+    elif canopy_correction_policy is not None:
+        raise ValueError("canopy_correction_policy requires apply_canopy_correction=True")
 
     validate_spires_data(data)
     if data.results is None:
@@ -149,6 +152,7 @@ def process(
             average_vertical_crown_radius=average_vertical_crown_radius,
             average_horizontal_crown_radius=average_horizontal_crown_radius,
             canopy_correction_policy=canopy_correction_policy,
+            sensor=sensor,
         )
 
     if calculate_albedo:

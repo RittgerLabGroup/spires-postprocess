@@ -26,6 +26,10 @@ options = run_config.postprocess
 processed = process(
     inverted,
     apply_canopy_correction=options.apply_canopy_correction,
+    sensor="viirs",
+    canopy_correction_policy=(
+        "viirs_canopy_weighted_shade" if options.apply_canopy_correction else None
+    ),
     apply_ice_adjustment=options.apply_ice_adjustment,
     calculate_albedo=options.calculate_albedo,
     calculate_delta_vis=options.calculate_delta_vis,
@@ -46,7 +50,7 @@ Required object fields are:
 
 | Operation | Required fields |
 | --- | --- |
-| Canopy correction | `results.fsnow`, `results.fshade`, `ancillary.canopy_fraction`, `scene.sensor_zenith`; optional terrain use requires `ancillary.slope`, `ancillary.aspect`, and `scene.sensor_azimuth` together |
+| Canopy correction | Explicit matching `sensor` and `canopy_correction_policy`; `results.fsnow`, `results.fshade`, `ancillary.canopy_fraction`, `scene.sensor_zenith`, `ancillary.slope`, `ancillary.aspect`, and `scene.sensor_azimuth` |
 | Ice adjustment | `results.fsnow`, `results.fshade`, `ancillary.ice_fraction` |
 | Snow albedo | `results.grain_radius`, `results.lap_concentration`, `scene.cosine_solar_zenith`, `scene.cosine_illumination`, and a canonical albedo LUT |
 | Delta-VIS / radiative forcing | `results.grain_radius`, `results.lap_concentration`, `scene.cosine_solar_zenith`, and a canonical DV/RF LUT |
@@ -60,11 +64,19 @@ declared metre values to kilometres.
 
 ## Canopy and ice adjustments
 
-The September 18 operational selection uses **S2_062 for MODIS** and
-**S2_083 for VIIRS**, with explicit `canopy_correction_policy="modis_s2_062"`
-or `"viirs_s2_083"` in `process()` or `apply_snow_fraction_adjustments()`.
-The common/MODIS policy is not selected for VIIRS. `"legacy"` remains the
-backward-compatible default for callers without an explicit policy.
+Both `process()` and `apply_snow_fraction_adjustments()` require an explicit
+sensor and matching policy when canopy correction is requested:
+
+| Sensor | `canopy_correction_policy` | Shade treatment |
+| --- | --- | --- |
+| `modis` | `modis_full_shade` | Full shade |
+| `viirs` | `viirs_canopy_weighted_shade` | Canopy-dependent shade weighting |
+
+Missing policies, unknown sensors, cross-sensor policies, `legacy`, and retired
+research identifiers are rejected. There is no implicit legacy canopy algorithm.
+Omit the policy when canopy correction is disabled; ice-only and radiative-only
+operations do not require a canopy policy or sensor. The example above is for
+VIIRS; MODIS callers must supply the MODIS sensor and policy together.
 
 Both selected policies require terrain-aware projection with crown radii
 4.644/1.72. Let C be canopy fraction, V projected canopy, and S weighted shade.
@@ -72,7 +84,7 @@ MODIS uses full shade and exponent rho=0.1. VIIRS uses a shade weight decreasing
 linearly from 1 at C=0.05 to 0.25 at C=0.30, constant outside that interval,
 and rho=0.5. Set GF=1/(1-clip(S+V,0,0.99)), GR=1/(1-clip(S+C,0,0.99)),
 and H=GF/GR. Use GR*H**rho only where H>1, otherwise GF. Cap total gain at 5
-and corrected snow fraction at 1. The selected candidate and parameters are
+and corrected snow fraction at 1. The descriptive policy, sensor and parameters are
 persisted on `canopy_adjusted_fsnow`.
 
 Raw `fsnow` and `fshade` remain intact. The independent float32 `snow_detected`
@@ -80,8 +92,9 @@ layer uses raw fsnow >0.05 for MODIS and >0.04 for VIIRS, retaining missing
 raw observations as NaN. Detection does not zero the corrected magnitude;
 cloud/quality eligibility remains a separate downstream decision. The existing
 `ice_adjusted_fsnow` equation remains a separate legacy ice product; the new
-canopy policy does not change it. Operational full-tile confirmation is required
-before these regenerated products are used for temporal policy selection.
+canopy policy does not change it. Renaming the policies does not change their
+evaluated numerical behavior. Update direct callers and regenerate batch plans;
+do not edit immutable historical manifests to substitute new labels.
 
 The lower-level API remains independently usable:
 
@@ -90,6 +103,8 @@ from spires_postprocess import apply_snow_fraction_adjustments
 
 adjusted = apply_snow_fraction_adjustments(
     inversion_results,
+    sensor="viirs",
+    canopy_correction_policy="viirs_canopy_weighted_shade",
     canopy_fraction=data.ancillary["canopy_fraction"],
     ice_fraction=data.ancillary["ice_fraction"],
     sensor_zenith=data.scene["sensor_zenith"],
@@ -100,12 +115,10 @@ adjusted = apply_snow_fraction_adjustments(
 ```
 
 Supplying canopy data adds `canopy_adjusted_fsnow`. Supplying ice data adds
-`ice_adjusted_fsnow`. Both are calculated from the original `fsnow`:
+`ice_adjusted_fsnow`. Both use the original `fsnow`. Canopy correction uses the
+sensor-specific gain described above; the independent ice equation remains:
 
 ```text
-O_canopy = clip(fshade + viewable_canopy_fraction, 0, 0.99)
-canopy_adjusted_fsnow = clip(fsnow / (1 - O_canopy), 0, 1)
-
 O_ice = clip(fshade + viewable_canopy_fraction + ice_fraction, 0, 0.99)
 ice_adjusted_fsnow = max(clip(fsnow / (1 - O_ice), 0, 1), ice_fraction)
 ```
